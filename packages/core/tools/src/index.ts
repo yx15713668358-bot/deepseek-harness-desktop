@@ -26,6 +26,7 @@ import type { CodeSdkLanguage } from './code-mode.ts'
 import { renderToolsSdk } from './ts-types.ts'
 import type { ToolSdkSchema } from './ts-types.ts'
 import { renderToolsSdkPy } from './py-types.ts'
+import { ensureObjectRootedParameters } from './schema.ts'
 
 /**
  * Language → SDK-section renderer. The registry looks up the loaded
@@ -66,6 +67,7 @@ export {
   defineTool,
   valueSchemaSpecToJsonSchema,
   parameterSchemaSpecToJsonSchema,
+  ensureObjectRootedParameters,
   validateArgs,
   ToolArgsError,
   type ValueSchemaAnnotations,
@@ -1262,7 +1264,9 @@ export class ToolRuntime extends Service {
     return {
       name,
       description,
-      parameters: detached,
+      // The object-rooted schema satisfies the wire contract; interfaces do not
+      // structurally assign to the index-signature type.
+      parameters: ensureObjectRootedParameters(detached, name) as unknown as Record<string, unknown>,
     }
   }
 

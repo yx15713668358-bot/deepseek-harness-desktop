@@ -457,6 +457,34 @@ export function parameterSchemaSpecToJsonSchema(spec: ParameterSchemaSpec): Para
   return schema
 }
 
+/**
+ * Return parameters that declare a standard JSON Schema object root, compiling
+ * a flat parameter DSL when the definition is still in that shape. Tools
+ * minted by {@link defineTool} and the run_code getter already declare the
+ * object root; third-party plugins that call `tools.register` directly with a
+ * DSL-shaped `parameters` map would otherwise reach strict providers (the
+ * DeepSeek official API rejects a rootless schema) in a form they refuse, so
+ * the projection compiles them here.
+ * @param parameters - projected tool parameters, losslessly detached when required.
+ * @param toolName - tool name added to the compile-error context.
+ * @returns Object-rooted standard JSON Schema parameters.
+ */
+export function ensureObjectRootedParameters(
+  parameters: Record<string, unknown>,
+  toolName: string,
+): ParameterJsonSchema {
+  if (isJsonSchemaRecord(parameters) && parameters.type === 'object') {
+    // Guarded above: the record declares an object root; the interface's
+    // structural fields follow from the JSON Schema subset, not from this cast.
+    return parameters as unknown as ParameterJsonSchema
+  }
+  try {
+    return parameterSchemaSpecToJsonSchema(parameters as ParameterSchemaSpec)
+  } catch (error) {
+    throw new Error(`tool "${toolName}" parameters are neither an object-rooted JSON Schema nor a valid parameter DSL: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 /** Invalid model-generated arguments for a typed tool. */
 export class ToolArgsError extends HarnessError {
   /** Individual violations in schema-walk order. */

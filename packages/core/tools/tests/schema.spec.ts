@@ -1,5 +1,6 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import {
+  ensureObjectRootedParameters,
   JsonSchemaError,
   parameterSchemaSpecToJsonSchema,
   valueSchemaSpecToJsonSchema,
@@ -201,5 +202,33 @@ describe('the unified author schema DSL', () => {
       symbol: { [symbolKey]: { type: 'string' } } satisfies ParameterSchemaSpec,
     }
     expect(Object.keys(invalidObjects)).toHaveLength(5)
+  })
+})
+
+describe('ensureObjectRootedParameters', () => {
+  it('compiles a flat DSL-shaped map into an object-rooted schema', () => {
+    expect(ensureObjectRootedParameters({
+      spec: { type: 'string', required: true, description: 'package spec' },
+    }, 'market_install')).toEqual({
+      type: 'object',
+      properties: {
+        spec: { type: 'string', description: 'package spec' },
+      },
+      required: ['spec'],
+    })
+  })
+
+  it('passes an already object-rooted schema through unchanged', () => {
+    const schema = {
+      type: 'object' as const,
+      properties: { spec: { type: 'string' as const } },
+      required: ['spec'],
+    }
+    expect(ensureObjectRootedParameters(schema, 'typed')).toBe(schema)
+  })
+
+  it('rejects neither-schema input with the tool name in the error', () => {
+    expect(() => ensureObjectRootedParameters({ spec: { type: 'not-a-type' } }, 'market_search'))
+      .toThrow(/tool "market_search" parameters are neither an object-rooted JSON Schema nor a valid parameter DSL/u)
   })
 })
