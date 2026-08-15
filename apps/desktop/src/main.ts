@@ -19,6 +19,7 @@ import {
 } from 'electron'
 import { createPortStore, isPortFree, type PortStore } from './host-port.ts'
 import { createHostSupervisor, spawnDshWeb, type HostSupervisor } from './host-supervisor.ts'
+import { createWorkingDirectoryStore, resolveWorkingDirectory, type WorkingDirectoryStore } from './working-directory.ts'
 import { createDesktopLifecycle, type DesktopLifecycle } from './window-lifecycle.ts'
 
 const APP_NAME = 'DeepSeek Harness'
@@ -46,6 +47,7 @@ let tray: Tray | undefined
 let host: HostSupervisor | undefined
 let lifecycle: DesktopLifecycle | undefined
 let hostOrigin: string | undefined
+let hostCwd: string | undefined
 let hostState: HostState = 'stopped'
 let bootQuitPromise: Promise<void> | undefined
 let quitReleased = false
@@ -53,7 +55,14 @@ let restartTimer: ReturnType<typeof setTimeout> | undefined
 let restartDelayMs = RESTART_BASE_DELAY_MS
 let autoRestart = false
 let portStore: PortStore | undefined
+let workingDirStore: WorkingDirectoryStore | undefined
 let hostLogger: (chunk: string) => void = chunk => process.stderr.write(chunk)
+
+/** The working-directory preference store, created on first use. */
+function hostWorkingDirectoryStore(): WorkingDirectoryStore {
+  workingDirStore ??= createWorkingDirectoryStore(app.getPath('userData'))
+  return workingDirStore
+}
 
 /** Resolve artifacts from the checkout in development and resourcesPath when packaged. */
 function hostPaths(): { nodeExecutable: string; cliEntry: string; cwd: string; electronRunAsNode: boolean } {
@@ -61,14 +70,14 @@ function hostPaths(): { nodeExecutable: string; cliEntry: string; cwd: string; e
     return {
       nodeExecutable: process.env.DSH_DESKTOP_NODE_EXECUTABLE ?? 'node',
       cliEntry: join(REPOSITORY_ROOT, 'apps/cli/lib/bin.js'),
-      cwd: process.cwd(),
+      cwd: resolveWorkingDirectory(hostWorkingDirectoryStore(), process.cwd()),
       electronRunAsNode: false,
     }
   }
   return {
     nodeExecutable: process.execPath,
     cliEntry: join(process.resourcesPath, 'host/node_modules/@deepseek-ai/dsh/lib/bin.js'),
-    cwd: app.getPath('home'),
+    cwd: resolveWorkingDirectory(hostWorkingDirectoryStore(), app.getPath('home')),
     electronRunAsNode: true,
   }
 }
@@ -253,6 +262,16 @@ function rebuildTrayMenu(): void {
       enabled: hostState === 'running' && hostOrigin !== undefined,
       click: () => { if (hostOrigin !== undefined) void shell.openExternal(hostOrigin) },
     },
+    { type: 'separator' },
+    {
+      label: hostCwd === undefined ? '工作目录' : `工作目录：${hostCwd}`,
+      enabled: false,
+    },
+    {
+      label: '切换工作目录…',
+      enabled: hostState === 'running' || hostState === 'restarting',
+      click: () => { void chooseWorkingDirectory() },
+    },
     { label: '打开日志目录', click: () => { void shell.openPath(app.getPath('userData')) } },
     { type: 'separator' },
     {
@@ -275,6 +294,23 @@ function setHostState(state: HostState): void {
 }
 
 /**
+ * Persist a tray-chosen Host working directory and restart the Host on it.
+ * The persisted choice becomes the default for every later launch; an
+ * unchanged directory leaves the running Host untouched.
+ */
+async function chooseWorkingDirectory(): Promise<void> {
+  const result = await dialog.showOpenDialog({
+    title: '选择工作目录',
+    ...(hostCwd === undefined ? {} : { defaultPath: hostCwd }),
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  const picked = result.filePaths[0]
+  if (result.canceled || picked === undefined || picked === hostCwd) return
+  hostWorkingDirectoryStore().write(picked)
+  await manualRestartHost()
+}
+
+/**
  * Start one supervised Host generation on a loopback port.
  * @returns The readiness origin the supervisor parsed from the Host.
  */
@@ -282,6 +318,7 @@ async function startHost(): Promise<string> {
   const paths = hostPaths()
   const savedPort = portStore?.read()
   const port = savedPort !== undefined && await isPortFree(savedPort) ? savedPort : undefined
+  hostCwd = paths.cwd
   host = createHostSupervisor({
     spawnHost: () => spawnDshWeb({ ...paths, ...(port === undefined ? {} : { port }), env: hostEnv() }),
     log: hostLogger,
