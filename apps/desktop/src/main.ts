@@ -1,12 +1,13 @@
 /** Electron application shell for the loopback DeepSeek Harness Web Host. */
 
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   app,
   BrowserWindow,
   dialog,
+  globalShortcut,
   Menu,
   nativeImage,
   session,
@@ -15,6 +16,7 @@ import {
   type Event,
   type MenuItemConstructorOptions,
 } from 'electron'
+import { createPortStore, isPortFree, type PortStore } from './host-port.ts'
 import { createHostSupervisor, spawnDshWeb, type HostSupervisor } from './host-supervisor.ts'
 import { createDesktopLifecycle, type DesktopLifecycle } from './window-lifecycle.ts'
 
@@ -23,14 +25,34 @@ const WINDOW_WIDTH = 1440
 const WINDOW_HEIGHT = 920
 const DESKTOP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const REPOSITORY_ROOT = resolve(DESKTOP_DIR, '../..')
+const GLOBAL_SHORTCUT = 'CommandOrControl+Shift+D'
+const RESTART_BASE_DELAY_MS = 1_000
+const RESTART_MAX_DELAY_MS = 30_000
+const HOST_LOG_MAX_BYTES = 1_000_000
+
+/** Supervised Host lifecycle state shown in the tray menu. */
+type HostState = 'starting' | 'running' | 'restarting' | 'stopped'
+
+const HOST_STATE_LABELS: Readonly<Record<HostState, string>> = {
+  starting: '后端状态：启动中…',
+  running: '后端状态：运行中',
+  restarting: '后端状态：重连中…',
+  stopped: '后端状态：已停止',
+}
 
 let mainWindow: BrowserWindow | undefined
 let tray: Tray | undefined
 let host: HostSupervisor | undefined
 let lifecycle: DesktopLifecycle | undefined
 let hostOrigin: string | undefined
+let hostState: HostState = 'stopped'
 let bootQuitPromise: Promise<void> | undefined
 let quitReleased = false
+let restartTimer: ReturnType<typeof setTimeout> | undefined
+let restartDelayMs = RESTART_BASE_DELAY_MS
+let autoRestart = false
+let portStore: PortStore | undefined
+let hostLogger: (chunk: string) => void = chunk => process.stderr.write(chunk)
 
 /** Resolve artifacts from the checkout in development and resourcesPath when packaged. */
 function hostPaths(): { nodeExecutable: string; cliEntry: string; cwd: string; electronRunAsNode: boolean } {
@@ -68,6 +90,40 @@ function trayImage(): Electron.NativeImage {
   const image = path === undefined ? nativeImage.createEmpty() : nativeImage.createFromPath(path)
   if (process.platform === 'darwin') image.setTemplateImage(true)
   return image
+}
+
+/** Environment for the Host process, restoring tool PATHs when launched as a GUI app. */
+function hostEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, DSH_DESKTOP: '1' }
+  if (!app.isPackaged) return env
+  // GUI-launched apps inherit a minimal PATH; restore common toolchain locations
+  // the Host's bash tools expect before the inherited entries.
+  const toolPathEntries = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/usr/local/sbin', '/opt/local/bin']
+  const currentEntries = (env.PATH ?? '').split(':').filter(entry => entry !== '')
+  env.PATH = [...new Set([...toolPathEntries, ...currentEntries])].join(':')
+  return env
+}
+
+/** Sink Host output to a per-run log file plus the process stderr. */
+function createHostLogger(): (chunk: string) => void {
+  const file = join(app.getPath('userData'), 'host.log')
+  try {
+    // Each application run starts a fresh log; restarts within the run append.
+    writeFileSync(file, '')
+  } catch {
+    // Unwritable log file degrades to stderr-only diagnostics.
+    return chunk => process.stderr.write(chunk)
+  }
+  return (chunk) => {
+    try {
+      appendFileSync(file, chunk)
+      // Past the cap, drop the oldest output: keep the trailing window only.
+      if (statSync(file).size > HOST_LOG_MAX_BYTES) writeFileSync(file, '')
+    } catch {
+      // Logging must never disturb the Host; stderr still carries the chunk.
+    }
+    process.stderr.write(chunk)
+  }
 }
 
 function isExternalUrl(raw: string): boolean {
@@ -141,7 +197,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
     if (mainWindow === window) mainWindow = undefined
   })
   window.webContents.on('will-navigate', (event, url) => {
-    if (hasOrigin(url, origin)) return
+    if (hostOrigin !== undefined && hasOrigin(url, hostOrigin)) return
     event.preventDefault()
     if (isExternalUrl(url)) void shell.openExternal(url)
   })
@@ -156,16 +212,137 @@ async function createMainWindow(): Promise<BrowserWindow> {
   return window
 }
 
+/** Reload the renderer onto a changed Host origin after a restart. */
+async function navigateToHost(origin: string): Promise<void> {
+  const window = mainWindow
+  if (window === undefined || window.isDestroyed()) return
+  const rendererUrl = new URL(origin)
+  rendererUrl.searchParams.set('dsh-desktop-platform', process.platform)
+  await window.loadURL(rendererUrl.href)
+}
+
 function createTray(): void {
   tray = new Tray(trayImage())
   tray.setToolTip(APP_NAME)
+  tray.on('click', () => { void lifecycle?.showWindow() })
+  rebuildTrayMenu()
+}
+
+/** Rebuild the tray menu for the current Host state and login-item setting. */
+function rebuildTrayMenu(): void {
+  if (tray === undefined) return
   const template: MenuItemConstructorOptions[] = [
     { label: '打开主窗口', click: () => { void lifecycle?.showWindow() } },
+    { type: 'separator' },
+    { label: HOST_STATE_LABELS[hostState], enabled: false },
+    {
+      label: '重启后端',
+      enabled: hostState === 'running' || hostState === 'restarting',
+      click: () => { void manualRestartHost() },
+    },
+    {
+      label: '在浏览器打开',
+      enabled: hostState === 'running' && hostOrigin !== undefined,
+      click: () => { if (hostOrigin !== undefined) void shell.openExternal(hostOrigin) },
+    },
+    { label: '打开日志目录', click: () => { void shell.openPath(app.getPath('userData')) } },
+    { type: 'separator' },
+    {
+      label: '开机自启',
+      type: 'checkbox',
+      checked: app.getLoginItemSettings().openAtLogin,
+      click: (item) => { app.setLoginItemSettings({ openAtLogin: item.checked }) },
+    },
     { type: 'separator' },
     { label: '退出', click: () => { void requestAppQuit() } },
   ]
   tray.setContextMenu(Menu.buildFromTemplate(template))
-  tray.on('click', () => { void lifecycle?.showWindow() })
+}
+
+/** Publish a Host state transition to the tray menu. */
+function setHostState(state: HostState): void {
+  if (hostState === state) return
+  hostState = state
+  rebuildTrayMenu()
+}
+
+/**
+ * Start one supervised Host generation on a loopback port.
+ * @returns The readiness origin the supervisor parsed from the Host.
+ */
+async function startHost(): Promise<string> {
+  const paths = hostPaths()
+  const savedPort = portStore?.read()
+  const port = savedPort !== undefined && await isPortFree(savedPort) ? savedPort : undefined
+  host = createHostSupervisor({
+    spawnHost: () => spawnDshWeb({ ...paths, ...(port === undefined ? {} : { port }), env: hostEnv() }),
+    log: hostLogger,
+    onUnexpectedExit: (detail) => {
+      if (!autoRestart) return
+      console.error(`desktop Host exited unexpectedly (code ${String(detail.code)}, signal ${String(detail.signal)})`)
+      scheduleRestart()
+    },
+  })
+  const origin = await host.start()
+  portStore?.write(Number(new URL(origin).port))
+  return origin
+}
+
+/** Schedule one supervised restart with exponential backoff. */
+function scheduleRestart(): void {
+  if (restartTimer !== undefined) return
+  setHostState('restarting')
+  restartTimer = setTimeout(() => {
+    restartTimer = undefined
+    void restartHost()
+  }, restartDelayMs)
+  restartDelayMs = Math.min(restartDelayMs * 2, RESTART_MAX_DELAY_MS)
+}
+
+/** Restart the Host after an unexpected exit; recoveries reset the backoff. */
+async function restartHost(): Promise<void> {
+  if (!autoRestart) return
+  try {
+    const origin = await startHost()
+    restartDelayMs = RESTART_BASE_DELAY_MS
+    setHostState('running')
+    if (origin !== hostOrigin) {
+      hostOrigin = origin
+      await navigateToHost(origin)
+    }
+  } catch (error) {
+    console.error('desktop Host restart failed:', error)
+    scheduleRestart()
+  }
+}
+
+/** Gracefully replace the running Host on tray request. */
+async function manualRestartHost(): Promise<void> {
+  if (restartTimer !== undefined) {
+    clearTimeout(restartTimer)
+    restartTimer = undefined
+  }
+  setHostState('starting')
+  const current = host
+  try {
+    if (current !== undefined) await current.shutdown()
+    const origin = await startHost()
+    restartDelayMs = RESTART_BASE_DELAY_MS
+    setHostState('running')
+    if (origin !== hostOrigin) {
+      hostOrigin = origin
+      await navigateToHost(origin)
+    }
+  } catch (error) {
+    console.error('desktop Host manual restart failed:', error)
+    if (autoRestart) scheduleRestart()
+  }
+}
+
+/** Register the global show-window accelerator once after boot. */
+function registerGlobalShortcut(): void {
+  const registered = globalShortcut.register(GLOBAL_SHORTCUT, () => { void lifecycle?.showWindow() })
+  if (!registered) console.error(`failed to register global shortcut ${GLOBAL_SHORTCUT}`)
 }
 
 function releaseAppQuit(): void {
@@ -190,30 +367,27 @@ async function boot(): Promise<void> {
   if (bootQuitPromise !== undefined) return
   const paths = hostPaths()
   assertHostArtifacts(paths)
-  host = createHostSupervisor({
-    spawnHost: () => spawnDshWeb({
-      ...paths,
-      env: {
-        ...process.env,
-        DSH_DESKTOP: '1',
-      },
-    }),
-    log: chunk => process.stderr.write(chunk),
-    onUnexpectedExit: ({ code, signal }) => {
-      console.error(`desktop Host exited unexpectedly (code ${String(code)}, signal ${String(signal)})`)
-      void requestAppQuit()
-    },
-  })
-  hostOrigin = await host.start()
+  portStore = createPortStore(app.getPath('userData'))
+  hostLogger = createHostLogger()
+  autoRestart = true
   hardenSession()
   lifecycle = createDesktopLifecycle({
     getWindow: () => mainWindow,
     createWindow: createMainWindow,
-    disposeHost: async () => { await host?.shutdown() },
+    disposeHost: async () => {
+      autoRestart = false
+      if (restartTimer !== undefined) clearTimeout(restartTimer)
+      setHostState('stopped')
+      await host?.shutdown()
+    },
     quit: releaseAppQuit,
     reportError: (error) => { console.error('desktop shutdown failed:', error) },
   })
   createTray()
+  setHostState('starting')
+  hostOrigin = await startHost()
+  setHostState('running')
+  registerGlobalShortcut()
   await lifecycle.showWindow()
 }
 
@@ -225,6 +399,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('window-all-closed', () => {
     // Tray and Host own application lifetime on every platform.
   })
+  app.on('will-quit', () => { globalShortcut.unregisterAll() })
   app.on('before-quit', (event: Event) => {
     if (quitReleased) return
     event.preventDefault()

@@ -305,4 +305,33 @@ describe('desktop Host process', () => {
       expect.objectContaining({ env: { DSH_DESKTOP: '1', ELECTRON_RUN_AS_NODE: '1' } }),
     )
   })
+
+  it('passes a preferred port and a POSIX process group to spawn', async () => {
+    const spawned = {
+      stdout: { on: vi.fn(), off: vi.fn() },
+      stderr: { on: vi.fn(), off: vi.fn() },
+      on: vi.fn(),
+      off: vi.fn(),
+      kill: vi.fn(),
+    }
+    vi.mocked(spawn).mockReturnValue(spawned as never)
+
+    const { spawnDshWeb } = await import('../src/host-supervisor.ts')
+    spawnDshWeb({
+      nodeExecutable: 'node',
+      cliEntry: '/repo/apps/cli/lib/bin.js',
+      cwd: '/repo',
+      env: { DSH_DESKTOP: '1' },
+      port: 42_637,
+    })
+
+    expect(spawn).toHaveBeenCalledWith(
+      'node',
+      ['--expose-internals', '/repo/apps/cli/lib/bin.js', 'web', '--host', '127.0.0.1', '--port', '42637'],
+      expect.objectContaining({
+        env: { DSH_DESKTOP: '1' },
+        ...(process.platform === 'win32' ? {} : { detached: true }),
+      }),
+    )
+  })
 })

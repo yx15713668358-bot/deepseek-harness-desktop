@@ -257,6 +257,8 @@ export interface SpawnDshWebOptions {
   readonly cwd: string
   /** Frozen environment for the Host process. */
   readonly env: NodeJS.ProcessEnv
+  /** Preferred loopback port; the OS assigns one when omitted or taken. */
+  readonly port?: number
   /** Run the Electron executable as its bundled Node runtime. */
   readonly electronRunAsNode?: boolean
 }
@@ -272,7 +274,7 @@ function streamAdapter(stream: NodeJS.ReadableStream): HostChild['stdout'] {
 }
 
 /**
- * Spawn the production Web Host on an OS-assigned loopback port.
+ * Spawn the production Web Host on a loopback port, preferring the persisted one.
  * @param options - Node runtime, built CLI and process environment.
  * @returns The child handle consumed by {@link createHostSupervisor}.
  */
@@ -280,13 +282,16 @@ export function spawnDshWeb(options: SpawnDshWebOptions): HostChild {
   const env = options.electronRunAsNode
     ? { ...options.env, ELECTRON_RUN_AS_NODE: '1' }
     : options.env
-  const process = spawn(options.nodeExecutable, ['--expose-internals', options.cliEntry, 'web', '--host', '127.0.0.1', '--port', '0'], {
+  const port = options.port === undefined ? '0' : String(options.port)
+  const hostChild = spawn(options.nodeExecutable, ['--expose-internals', options.cliEntry, 'web', '--host', '127.0.0.1', '--port', port], {
     cwd: options.cwd,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
+    // Own process group on POSIX so shutdown can reach tool subprocesses too.
+    detached: process.platform !== 'win32',
   })
-  return nodeChildAdapter(process)
+  return nodeChildAdapter(hostChild)
 }
 
 /** Adapt Node's event overloads to the supervisor's explicit ownership API. */
@@ -304,6 +309,15 @@ function nodeChildAdapter(child: ChildProcessByStdio<null, Readable, Readable>):
       return () => { child.off('error', listener) }
     },
     kill(signal) {
+      if (child.pid !== undefined && process.platform !== 'win32') {
+        try {
+          // Signal the whole group: the Host's tool subprocesses die with it.
+          process.kill(-child.pid, signal)
+          return
+        } catch {
+          // The group no longer exists; fall through to the direct child.
+        }
+      }
       child.kill(signal)
     },
   }
