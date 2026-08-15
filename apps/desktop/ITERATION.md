@@ -6,7 +6,7 @@
 ## 硬性规约（每次都必须遵守）
 
 1. **在独立分支上干活**：从最新 `master` 切 `iterate/<简短功能名>` 分支，禁止直接改 master。
-2. **测试必须全过**：`pnpm --filter @deepseek-ai/dsh-desktop exec vitest run apps/desktop/tests`，任何改动都必须保持 56+ 全绿并补充新测试。
+2. **测试必须全过**：`pnpm exec vitest run apps/desktop/tests`（在仓库根目录执行），任何改动都必须保持 56+ 全绿并补充新测试。
 3. **类型检查必须过**：`pnpm --filter @deepseek-ai/dsh-desktop run typecheck`。
 4. **遵循仓库 AGENTS.md 规范**：ESM、JSDoc、精确类型（exactOptionalPropertyTypes）、双语 README 同步。
 5. **提交并推送**：完成一个功能后 commit（conventional commits，如 `feat(desktop): ...`），推送到 `origin master`（origin = https://github.com/yx15713668358-bot/deepseek-harness-desktop.git）。推送需要 `PATH="$HOME/bin:$PATH"`（pnpm shim）并带代理环境变量 `HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890`。
