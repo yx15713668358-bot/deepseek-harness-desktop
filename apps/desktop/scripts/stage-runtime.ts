@@ -13,6 +13,8 @@ const deployPackage = '@deepseek-ai/dsh-desktop-runtime'
 const entry = join(staging, 'node_modules/@deepseek-ai/dsh/lib/bin.js')
 const frontend = join(staging, 'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html')
 const workspaceState = join(repositoryRoot, 'node_modules/.pnpm-workspace-state-v1.json')
+const workspaceManifest = join(repositoryRoot, 'pnpm-workspace.yaml')
+const DEV_ONLY_PATCH_LINE = '  app-builder-lib@26.15.3: patches/app-builder-lib@26.15.3.patch\n'
 
 interface Manifest {
   readonly dependencies?: Readonly<Record<string, string>>
@@ -95,13 +97,33 @@ async function deploy(): Promise<void> {
   }
 }
 
+/**
+ * Run one staging step with the desktop-only patch line removed from the
+ * workspace manifest. The patch targets electron-builder's dev dependency,
+ * which never enters the Host runtime closure; pnpm deploy rejects a
+ * declared-but-unused patch, so the temporary manifest omits it.
+ * @param step - The deploy step to run against the temporary manifest.
+ * @returns The step's result with the original manifest restored.
+ */
+async function withoutDevOnlyPatch<T>(step: () => Promise<T>): Promise<T> {
+  const original = await readFile(workspaceManifest, 'utf8')
+  const stripped = original.replace(DEV_ONLY_PATCH_LINE, '')
+  if (stripped === original) throw new Error('desktop runtime staging: expected the app-builder-lib patch line in pnpm-workspace.yaml')
+  try {
+    await writeFile(workspaceManifest, stripped)
+    return await step()
+  } finally {
+    await writeFile(workspaceManifest, original)
+  }
+}
+
 async function main(): Promise<void> {
   await run(process.execPath, [
     '--import', 'tsx', 'scripts/verify-runtime-closure.ts',
     '--manifest', 'apps/desktop/runtime/package.json',
   ])
   await rm(staging, { recursive: true, force: true })
-  await deploy()
+  await withoutDevOnlyPatch(deploy)
   await restoreLegacyHoists()
   await materializeLinks()
   if (!existsSync(entry)) throw new Error(`desktop Host entry missing after staging: ${entry}`)
