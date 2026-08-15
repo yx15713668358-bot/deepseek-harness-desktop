@@ -1,6 +1,7 @@
 /** Electron application shell for the loopback DeepSeek Harness Web Host. */
 
 import { appendFileSync, existsSync, statSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -95,10 +96,17 @@ function trayImage(): Electron.NativeImage {
 /** Environment for the Host process, restoring tool PATHs when launched as a GUI app. */
 function hostEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, DSH_DESKTOP: '1' }
-  if (!app.isPackaged) return env
-  // GUI-launched apps inherit a minimal PATH; restore common toolchain locations
-  // the Host's bash tools expect before the inherited entries.
-  const toolPathEntries = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/usr/local/sbin', '/opt/local/bin']
+  // GUI-launched apps inherit a minimal PATH, and a user npm prefix lives
+  // outside it. Restore both before the inherited entries so the Host's bash
+  // tools and the marketplace's `dsh plugin` invocations can find them.
+  const toolPathEntries = [
+    join(homedir(), '.npm-global', 'bin'),
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+    '/usr/local/sbin',
+    '/opt/local/bin',
+  ]
   const currentEntries = (env.PATH ?? '').split(':').filter(entry => entry !== '')
   env.PATH = [...new Set([...toolPathEntries, ...currentEntries])].join(':')
   return env
