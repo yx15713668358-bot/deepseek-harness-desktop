@@ -10,7 +10,7 @@ Status: implemented
 
 ## Decision
 
-在投影时编译，而非注册时。`ToolsRegistry.schemaOf` 是所有 wire/schema 发射必经的唯一投影点，现在对投影参数运行 `ensureObjectRootedParameters`：已声明 `type: "object"` 的值原样通过（defineTool 的输出、run_code getter），其余一律按参数 DSL 处理并用 `parameterSchemaSpecToJsonSchema` 编译。注册路径保持原样，`run_code` 的语言感知 `parameters` getter 因此保留其惰性运行时解析。两种形状都不匹配的输入在投影时带工具名响亮失败。
+在投影时编译，而非注册时。`ToolsRegistry.schemaOf` 是所有 wire/schema 发射必经的唯一投影点，现在对投影参数运行 `ensureObjectRootedParameters`：已声明 `type: "object"` 的值原样通过（defineTool 的输出、run_code getter），其余一律按参数 DSL 处理并用 `parameterSchemaSpecToJsonSchema` 编译。由于第三方插件惯用 `required: false` 标注可选属性（语义上等价于 DSL 的 true-or-absent 必填性），投影在编译前递归剥离 `required: false` 标注。注册路径保持原样，`run_code` 的语言感知 `parameters` getter 因此保留其惰性运行时解析。两种形状都不匹配的输入在投影时带工具名响亮失败。
 
 ## Consequences
 

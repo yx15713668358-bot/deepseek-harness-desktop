@@ -218,6 +218,50 @@ describe('ensureObjectRootedParameters', () => {
     })
   })
 
+  it('tolerates required: false annotations written by third-party plugins', () => {
+    expect(ensureObjectRootedParameters({
+      q: { type: 'string', required: false, description: 'search keyword' },
+      page: { type: 'integer', required: false },
+      perPage: { type: 'integer', required: false },
+      force: { type: 'boolean', required: true },
+    }, 'market_search')).toEqual({
+      type: 'object',
+      properties: {
+        q: { type: 'string', description: 'search keyword' },
+        page: { type: 'integer' },
+        perPage: { type: 'integer' },
+        force: { type: 'boolean' },
+      },
+      required: ['force'],
+    })
+  })
+
+  it('strips required: false from nested properties too', () => {
+    expect(ensureObjectRootedParameters({
+      filter: {
+        type: 'object',
+        additionalProperties: false,
+        required: false,
+        properties: {
+          name: { type: 'string', required: false },
+          tags: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    }, 'nested')).toEqual({
+      type: 'object',
+      properties: {
+        filter: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            name: { type: 'string' },
+            tags: { type: 'array', items: { type: 'string' } },
+          },
+        },
+      },
+    })
+  })
+
   it('passes an already object-rooted schema through unchanged', () => {
     const schema = {
       type: 'object' as const,

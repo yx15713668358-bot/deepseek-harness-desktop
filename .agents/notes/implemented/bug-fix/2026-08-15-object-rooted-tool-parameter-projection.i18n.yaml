@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-15-object-rooted-tool-parameter-projection.md
-2026-08-15-object-rooted-tool-parameter-projection.md: aca48ac6c7e6348f0bbe59a7a04868c9dfda9bfd
-2026-08-15-object-rooted-tool-parameter-projection.zh.md: 047b317f81ada33bc2fe5092dd9a9a36e82635c4
+2026-08-15-object-rooted-tool-parameter-projection.md: a97d1b6c1329afba88a436e1a0a11964597bf319
+2026-08-15-object-rooted-tool-parameter-projection.zh.md: ccda08de7c23bf83d91747fa73cecc01eac5c582

@@ -10,7 +10,7 @@ Third-party plugins that call `ctx.tools.register` directly with a flat DSL-shap
 
 ## Decision
 
-Compile at projection, not at registration. `ToolsRegistry.schemaOf` — the single point every wire/schema emission passes through — now runs `ensureObjectRootedParameters` on the projected parameters: values that already declare `type: "object"` pass through unchanged (defineTool output, the run_code getter), everything else is treated as the parameter DSL and compiled with `parameterSchemaSpecToJsonSchema`. Registration stays unmodified, so the language-aware `parameters` getter on `run_code` keeps its lazy runtime resolution. Neither-form input fails loud at projection with the tool name in the error.
+Compile at projection, not at registration. `ToolsRegistry.schemaOf` — the single point every wire/schema emission passes through — now runs `ensureObjectRootedParameters` on the projected parameters: values that already declare `type: "object"` pass through unchanged (defineTool output, the run_code getter), everything else is treated as the parameter DSL and compiled with `parameterSchemaSpecToJsonSchema`. Because third-party plugins routinely annotate optional properties with `required: false` (semantically identical to the DSL's true-or-absent requiredness), the projection strips `required: false` annotations recursively before compiling. Registration stays unmodified, so the language-aware `parameters` getter on `run_code` keeps its lazy runtime resolution. Neither-form input fails loud at projection with the tool name in the error.
 
 ## Consequences
 

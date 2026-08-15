@@ -458,6 +458,26 @@ export function parameterSchemaSpecToJsonSchema(spec: ParameterSchemaSpec): Para
 }
 
 /**
+ * Strip `required: false` annotations recursively. The DSL's requiredness is
+ * true-or-absent (`required?: true`), but third-party plugins routinely write
+ * `required: false` for optional properties; the two forms are semantically
+ * identical, so the false annotation is removed before compilation.
+ * @param value - one projected DSL node or property map.
+ * @returns The same JSON tree without `required: false` annotations.
+ */
+function stripRequiredFalse(value: unknown): unknown {
+  if (!isJsonSchemaRecord(value)) return value
+  const out: Record<string, unknown> = {}
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === 'required' && entry === false) continue
+    if (isJsonSchemaRecord(entry)) out[key] = stripRequiredFalse(entry)
+    else if (Array.isArray(entry)) out[key] = entry.map(item => stripRequiredFalse(item))
+    else out[key] = entry
+  }
+  return out
+}
+
+/**
  * Return parameters that declare a standard JSON Schema object root, compiling
  * a flat parameter DSL when the definition is still in that shape. Tools
  * minted by {@link defineTool} and the run_code getter already declare the
@@ -479,7 +499,8 @@ export function ensureObjectRootedParameters(
     return parameters as unknown as ParameterJsonSchema
   }
   try {
-    return parameterSchemaSpecToJsonSchema(parameters as ParameterSchemaSpec)
+    const normalized = stripRequiredFalse(parameters) as ParameterSchemaSpec
+    return parameterSchemaSpecToJsonSchema(normalized)
   } catch (error) {
     throw new Error(`tool "${toolName}" parameters are neither an object-rooted JSON Schema nor a valid parameter DSL: ${error instanceof Error ? error.message : String(error)}`)
   }
